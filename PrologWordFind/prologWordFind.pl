@@ -72,6 +72,25 @@ listBind([]).
 % make_word_find_linear(Words,Size,Result) :-
 % YOUR COOL CODE HERE (you'll need helper functions)
 
+make_word_find_linear(Words,Size,Result) :- 
+  helper(Words,Size,Temp), 
+  listBind(Temp), 
+  string_codes(Result,Temp).
+
+helper([],Size,Result) :- length(Result,Size).
+helper([First|Rest],Size,Result) :- 
+  length(Result,Size),
+  string_codes(First,FirstList),
+  sublist(FirstList,Result),
+  helper(Rest,Size,Result).
+
+sublist([],_).
+sublist(X,[Y|YS]) :- prefix(X,[Y|YS]).
+sublist(X,[_|YS]) :- sublist(X,YS).
+
+prefix([],_).
+prefix([A|XS],[A|YS]) :- prefix(XS,YS).
+
 
 %% Step C: 15 Points
 
@@ -99,7 +118,29 @@ listBind([]).
 % make_word_find_rect(Words,Width,Height,StringResults) :-
 % YOUR COOL CODE HERE (you'll need helper functions)
 
+make_word_find_rect(Words,Width,Height,StringResults) :-
+  Height > 0,
+  length(StringResults,Height),
+  partition(Words,Height,WordSets),
+  to_rect_string(WordSets,Width,StringResults).
 
+to_rect_string([],_,[]).
+to_rect_string([H1|T1],Width,[H2|T2]) :- 
+  make_word_find_linear(H1,Width,H2),
+  to_rect_string(T1,Width,T2).
+
+partition(Words,1,[Words]).
+partition(Words,NumBuckets,Buckets) :-
+  permutation(Words,ScrambledWords),
+  length(Buckets,NumBuckets),
+  append(Buckets,ScrambledWords),
+  inner_lists_sorted(Buckets).
+
+% removes redundant answers
+inner_lists_sorted([]).
+inner_lists_sorted([FirstList|OtherLists]) :-
+  sort(FirstList,FirstList),
+  inner_lists_sorted(OtherLists).
 
 
 %% Step D 5 points: This last step is not worth too many
@@ -126,3 +167,33 @@ listBind([]).
 % make_word_find_rect_v(Words,Width,Height,StringResults) :-
 % YOUR COOL CODE HERE (plus helper functions)
 
+make_word_find_rect_v(Words,Width,Height,StringResults) :-
+  partition(Words,2,[Horizontal|[Vertical]]),
+  make_word_find_rect(Horizontal,Width,Height,HResults),
+  make_word_find_rect(Vertical,Height,Width,VResults),
+  maplist(string_codes,VResults,Flipped),
+  maplist(string_codes,HResults,HCodes),
+  transpose(Flipped,VCodes),
+  merge(HCodes,VCodes,Codes),
+  maplist(listBind,Codes),
+  maplist(string_codes,StringResults,Codes).
+
+
+merge([],[],[]).
+merge([H1|T1],[H2|T2],[H3|T3]) :-
+  maplist(merge_letters,H1,H2,H3),
+  merge(T1,T2,T3).
+
+merge_letters(A,B,C) :- A = B, B = C.
+merge_letters(A,B,C) :- A = 63, B = C, C \= 63.
+merge_letters(A,B,C) :- A = C, B = 63, C \= 63.
+
+cdr([_|T],T).
+my_length(A,B) :- length(B,A).
+transpose([],_).
+transpose([H|T],A) :-
+  maplist(nth1(1),A,H),
+  maplist(cdr,A,B),
+  transpose(T,B),
+  length([H|T],L),
+  maplist(my_length(L),A).
