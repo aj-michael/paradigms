@@ -107,6 +107,7 @@ synod_member(Uid,{BNum,BUid},V,High,L,Status) ->
 
 
 managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb) ->
+  io:fwrite("Starting phase 1",[]),
   if
     length(Responders) == length(L) ->
       lists:map(fun(Member) -> Member ! {beginballot,PropB,CurV,Uid} end, Responders),
@@ -156,9 +157,17 @@ managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb) ->
   end.
 
 vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb) ->
+  io:fwrite("Starting phase 2",[]),
   if 
     length(AllVoters) == length(Responders) ->
       %Cb ! {success,CurV}, %% I think I want tihs line, but it makes other tests fail. IDK why. Goodluck.
+      io:fwrite("Cb is ~w~n",[Cb]),
+      if
+        Cb == null ->
+          ok;
+        true ->
+          Cb ! {success,CurV}
+      end,
       synod_member(Uid,{BNum,BUid},V,High,L,{success,CurV});
     true ->
       receive
@@ -192,7 +201,7 @@ disabled_synod_member(Uid,Bal,V,H,L,S) ->
       synod_member(Uid,Bal,V,H,L,S);
     exit ->
       ok;
-    _ ->
+    what ->
       disabled_synod_member(Uid,Bal,V,H,L,S)
   end.
 
@@ -253,13 +262,13 @@ start_synod_memeber_test_() ->
 
 generate_unused_ballot_number(UniqueID) ->
   UniqueID ! {generate, self()},
-  listen().
+  listen(50).
 
-listen() ->
+listen(Timeout) ->
   receive
     X -> X
   after
-    50 -> ignored
+    Timeout -> ignored
   end.
 
 unused_ballot_test_() ->
@@ -307,7 +316,7 @@ enable_disable_ballot_test_() ->
 % which is very inefficient.
 send_nextballot(UniqueId,Bnew) ->
   UniqueId ! {vote,Bnew,self()},
-  listen().
+  listen(50).
 
 nextballot1_test_() ->
     testme(?_test([
@@ -337,7 +346,7 @@ nextballot1_test_() ->
 % which is very inefficient.
 send_beginballot(UniqueId,B,Value) ->
   UniqueId ! {beginballot,B,Value,self()},
-  listen().
+  listen(50).
 
 beginballot1_test_() ->
     testme(?_test([
@@ -407,7 +416,7 @@ success1_test_() ->
 % ignored if the synod member is offline.
 set_members(UniqueID,ListOfAllSynodUniqueIDs) ->
   UniqueID ! {list,ListOfAllSynodUniqueIDs,self()},
-  listen().
+  listen(50).
 
 set_members_test_() ->
     testme(?_test([
@@ -458,7 +467,7 @@ send_fake_lastvote(ReceiverUniqueId,FakeSenderUniqueId,PrevBallot,PrevVote,NewBa
 % within the alloted timeframe.
 get_proposal_state(UniqueID) ->
   UniqueID ! {proposal_status,self()},
-  listen().
+  listen(50).
 
 % first, let's just test we can correctly get into the nextballot
 % state and return responses note that synod1 is also in the
@@ -630,8 +639,8 @@ propose_voted3_test_() ->
 % might or might not be successfully stored.
 
 propose_value(UniqueId, PossibleValue) ->
-  UniqueId ! {propose,PossibleValue,self()},
-  listen().
+  UniqueId ! {start_propose,PossibleValue,self()},
+  listen(500).
 
 % a test with 3 working synod members
 propose1_test_() ->
