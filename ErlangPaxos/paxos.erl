@@ -2,7 +2,6 @@
 -export([start_synod_member/1,
          generate_unused_ballot_number/1,
          setup/0,
-         propose_nextballot4_test_/0,
          disable_member/1,
          enable_member/1,
          send_nextballot/2,
@@ -93,10 +92,10 @@ synod_member(Uid,{BNum,BUid},V,High,L,Status) ->
     {list,List,From} ->
       From ! ok, 
       synod_member(Uid,{BNum,BUid},V,High,List,Status);
-    {start_propose,PossibleValue} ->
+    {start_propose,PossibleValue,Callback} ->
       NewB = {High+1,Uid},
       lists:map(fun(Member) -> Member ! {vote,NewB,self()} end, L),
-      managing_synod_member(Uid,{BNum,BUid},V,High,L,NewB,null,PossibleValue,0);
+      managing_synod_member(Uid,{BNum,BUid},V,High,L,NewB,null,PossibleValue,[],Callback);
     {proposal_status,From} ->
       From ! Status,
       synod_member(Uid,{BNum,BUid},V,High,L,Status);
@@ -107,46 +106,84 @@ synod_member(Uid,{BNum,BUid},V,High,L,Status) ->
   end.
 
 
-managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Count) ->
-  receive
-    {lastvote,OUid,Bal,Val,PropB} ->
-      if
-        Bal == null ->
-          managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Count+1);
-        CurB == null  ->
-          managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,Bal,Val,Count+1);
-        true ->
-          {CurNum,CurUid} = CurB,
-          {ONum,OUid} = Bal,
+managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb) ->
+  if
+    length(Responders) == length(L) ->
+      lists:map(fun(Member) -> Member ! {beginballot,PropB,CurV,Uid} end, Responders),
+      vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,[],Cb);
+    true ->
+      receive
+        {lastvote,OUid,Bal,Val,PropB} ->
           if
-            CurNum >= ONum ->
-              managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Count+1);
-            CurNum < ONum ->
-              managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,Bal,Val,Count+1)
+            Bal == null ->
+              managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,[OUid|Responders],Cb);
+            CurB == null  ->
+              managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,Bal,Val,[OUid|Responders],Cb);
+            true ->
+              {CurNum,CurUid} = CurB,
+              {ONum,OUid} = Bal,
+              if
+                CurNum >= ONum ->
+                  managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,[OUid|Responders],Cb);
+                CurNum < ONum ->
+                  managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,Bal,Val,[OUid|Responders],Cb)
+              end
+          end;
+        {proposal_status,From} ->
+          From ! {nextballot,CurV,length(L)-length(Responders)},
+          managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb);
+        {vote,{NewNum,NewUid},From} ->
+          if  
+            NewNum =< High ->
+              From ! ignored,
+              managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb);
+            BUid == null ->
+              From ! {lastvote,Uid,null,null,{NewNum,NewUid}},
+              managing_synod_member(Uid,{BNum,BUid},V,NewNum,L,PropB,CurB,CurV,Responders,Cb);
+            NewNum > High ->
+              From ! {lastvote,Uid,{BNum,BUid},V,{NewNum,NewUid}},
+              managing_synod_member(Uid,{BNum,BUid},V,NewNum,L,PropB,CurB,CurV,Responders,Cb)
           end
-      end;
-    {proposal_status,From} ->
-      From ! {nextballot,CurV,length(L)-Count},
-      managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Count);
-    {vote,{NewNum,NewUid},From} ->
-      if  
-        NewNum =< High ->
-          From ! ignored,
-          managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Count);
-        BUid == null ->
-          From ! {lastvote,Uid,null,null,{NewNum,NewUid}},
-          managing_synod_member(Uid,{BNum,BUid},V,NewNum,L,PropB,CurB,CurV,Count);
-        NewNum > High ->
-          From ! {lastvote,Uid,{BNum,BUid},V,{NewNum,NewUid}},
-          managing_synod_member(Uid,{BNum,BUid},V,NewNum,L,PropB,CurB,CurV,Count)
+      after 100 ->
+        if
+          length(Responders) > length(L) / 2 ->
+            lists:map(fun(Member) -> Member ! {beginballot,PropB,CurV,Uid} end, Responders),
+            vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,[],Cb);
+          length(Responders) =< length(L) / 2 ->
+            synod_member(Uid,{BNum,BUid},V,High,L,aborted)
+        end
       end
-  after 100 ->
-    if
-      Count > length(L) / 2 ->
-        synod_member(Uid,{BNum,BUid},V,High,L,success);
-      Count =< length(L) / 2 ->
+  end.
+
+vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb) ->
+  if 
+    length(AllVoters) == length(Responders) ->
+      %Cb ! {success,CurV}, %% I think I want tihs line, but it makes other tests fail. IDK why. Goodluck.
+      synod_member(Uid,{BNum,BUid},V,High,L,{success,CurV});
+    true ->
+      receive
+        {beginballot,{NNum,NUid},Value,From} ->
+          if  
+            NNum == High ->
+              From ! {voted,Uid,{NNum,NUid}},
+              vote_counting_synod_member(Uid,{NNum,NUid},Value,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
+            true ->
+              From ! ignored,
+              vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurB,AllVoters,Responders,Cb)
+          end;
+        {proposal_status,From} ->
+          From ! {voted,length(AllVoters) - length(Responders)},
+          vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
+        {voted,OUid,{NNum,NUid}} ->
+          case lists:member(OUid,Responders) of
+            true ->
+              vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
+            false ->
+              vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,[OUid|Responders],Cb)
+          end
+      after 100 ->
         synod_member(Uid,{BNum,BUid},V,High,L,aborted)
-    end
+      end
   end.
 
 disabled_synod_member(Uid,Bal,V,H,L,S) ->
@@ -389,7 +426,7 @@ set_members_test_() ->
 % If another start_propose_value occurs when another is in process, it
 % MAY abort the current process and make a new process.
 start_propose_value(UniqueId, PossibleValue) ->
-  UniqueId ! {start_propose,PossibleValue},
+  UniqueId ! {start_propose,PossibleValue,null},
   ok.
 
 % lets a test act like a synod member by sending responses that look
@@ -524,7 +561,7 @@ propose_nextballot4_test_() ->
 % that as usual, aborting doesn't mean the data is lost (the quorm
 % members will ensure it gets propigated at lastvote).
 send_fake_voted(ReceiverUniqueId,FakeSenderUniqueId,NewBallot) ->
-    solveme.
+  ReceiverUniqueId ! {voted,FakeSenderUniqueId,NewBallot}.
 
 
 % now we can just about get to the end of the process
@@ -593,7 +630,8 @@ propose_voted3_test_() ->
 % might or might not be successfully stored.
 
 propose_value(UniqueId, PossibleValue) ->
-    solveme.
+  UniqueId ! {propose,PossibleValue,self()},
+  listen().
 
 % a test with 3 working synod members
 propose1_test_() ->
