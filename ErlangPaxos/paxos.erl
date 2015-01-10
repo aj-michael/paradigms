@@ -121,7 +121,7 @@ managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,Responders,Cb) ->
             CurB == null  ->
               managing_synod_member(Uid,{BNum,BUid},V,High,L,PropB,Bal,Val,[OUid|Responders],Cb);
             true ->
-              {CurNum,CurUid} = CurB,
+              {CurNum,_} = CurB,
               {ONum,OUid} = Bal,
               if
                 CurNum >= ONum ->
@@ -183,7 +183,7 @@ vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Re
         {proposal_status,From} ->
           From ! {voted,length(AllVoters) - length(Responders)},
           vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
-        {voted,OUid,{NNum,NUid}} ->
+        {voted,OUid,_} ->
           case lists:member(OUid,Responders) of
             true ->
               vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
@@ -799,8 +799,8 @@ worker(Uid,SavedData,ProcessData,VoteData,Members) ->
           UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,LastBallot,LastValue,[OUid|Responders],Callback}}),
           worker(Uid,SavedData,UpdatedData,VoteData,Members);
         true ->   %% Compare CurrentBallot and LastBallot by number
-          {CurNum,CurUid} = CurrentBallot,
-          {LastNum,LastUid} = LastBallot,
+          {CurNum,_} = CurrentBallot,
+          {LastNum,_} = LastBallot,
           if
             CurNum >= LastNum ->  %% No ballot changes
               UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,CurrentBallot,ProposedValue,[OUid|Responders],Callback}}),
@@ -826,7 +826,7 @@ worker(Uid,SavedData,ProcessData,VoteData,Members) ->
       if
         ProcessData /= [] ->
           [{Key,Data}|RestOfData] = ProcessData,
-          {OriginalBallot,CurrentBallot,ProposedValue,Responders,Callback} = Data,
+          {OriginalBallot,_,ProposedValue,Responders,Callback} = Data,
           if
             length(Responders) > length(Members) / 2 ->   %% we have a quorum
               lists:map(fun(Member) -> Member ! {request_vote,Key,OriginalBallot,ProposedValue,Uid} end, Members),
@@ -837,7 +837,7 @@ worker(Uid,SavedData,ProcessData,VoteData,Members) ->
           end;
         VoteData /= [] ->
           [{Key,Data}|RestOfData] = VoteData,
-          {Ballot,Value,Quorum,Responders,Callback} = Data,
+          {_,Value,Quorum,Responders,Callback} = Data,
           if
             length(Responders) == length(Quorum) ->
               lists:map(fun(Member) -> Member ! {success,Key,Value} end, Members),
@@ -868,7 +868,7 @@ next_ballot_num(Key,SavedData) ->
   if
     Data == null -> 1;
     true ->
-      {LastBallot,Value,High} = Data,
+      {LastBallot,_,_} = Data,
       {BalNum,_} = LastBallot,
       BalNum+1
   end.
@@ -963,7 +963,7 @@ propose_paxos3_test_() ->
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% PART 3: Monitoring (25 points)
+%% PART 4: Monitoring (25 points)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % We want to have a monitoring process that ensures all the paxos
@@ -978,12 +978,18 @@ propose_paxos3_test_() ->
 
 % causes the paxos member to quit
 end_paxos_member(UniqueID) ->
-    solveme.
+  case global:whereis_name(UniqueID) of
+    undefined ->
+      false;
+    _ ->
+      global:whereis_name(UniqueID) ! exit,
+      true
+  end.
 
 
 % Creates a monitor and returns its process id
 start_paxos_monitor() ->
-    solveme.
+  spawn(fun() -> monitor([]) end).
 
 % create a new paxos member and start monitoring it
 % it should print a message if it restarts an instance
@@ -991,7 +997,26 @@ start_paxos_monitor() ->
 % Note:it should restart the instances on the same server
 % they were originally started on
 create_monitored_member(MonitorProcessId, UniqueId, ServerToStartOn) ->
-    solveme.
+  MonitorProcessId ! {create,UniqueId,ServerToStartOn},
+  ok.
+
+monitor(Workers) ->
+  receive
+    {create,UniqueId,Server} ->
+      Pid = spawn(Server,fun() -> worker(UniqueId,[],[],[],[]) end),
+      global:register_name(UniqueId,Pid),
+      Ref = erlang:monitor(process,Pid),
+      io:fwrite("PID ~w UniqueId ~w started~n",[Pid,UniqueId]),
+      monitor([{Ref,{UniqueId,Server}}|Workers]);
+    {'DOWN',Ref,process,OldPid,_} ->
+      {UniqueId,Server} = proplists:get_value(Ref,Workers),
+      NewPid = spawn(Server, fun() -> worker(UniqueId,[],[],[],[]) end),
+      global:register_name(UniqueId,NewPid),
+      NewRef = erlang:monitor(process,NewPid),
+      io:fwrite("PID ~w UniqueId ~w died -- restarting -- new Pid ~w~n",[OldPid,UniqueId,NewPid]),
+      LiveWorkers = proplists:delete(NewRef,Workers),
+      monitor([{NewRef,{UniqueId,Server}}|LiveWorkers])
+  end.
 
 % No unit tests for this one, but here's an example in operation.
 
