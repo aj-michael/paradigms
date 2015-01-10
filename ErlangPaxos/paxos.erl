@@ -178,7 +178,7 @@ vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Re
               vote_counting_synod_member(Uid,{NNum,NUid},Value,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb);
             true ->
               From ! ignored,
-              vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurB,AllVoters,Responders,Cb)
+              vote_counting_synod_member(Uid,{BNum,BUid},V,High,L,PropB,CurB,CurV,AllVoters,Responders,Cb)
           end;
         {proposal_status,From} ->
           From ! {voted,length(AllVoters) - length(Responders)},
@@ -709,7 +709,169 @@ propose4_test_() ->
 % punishment.
 
 start_paxos_member(UniqueId) ->
-    solveme.
+  Pid = spawn(fun() -> worker(UniqueId,[],[],[],[]) end),
+  register(UniqueId,Pid).
+
+% SavedData is a proplist with a key and a value which is a tuple of
+% the last seen ballot, the highest ballot its seen, the proposed value
+% and potentially the status. And maybe the voting data? not sure on that
+
+%% I rewrote this because my synod code is disgusting
+%% and I understand the algorithm a little better now
+worker(Uid,SavedData,ProcessData,VoteData,Members) ->
+  receive
+    {generate,Key,From} ->
+      NextBallotNum = next_ballot_num(Key,SavedData),
+      From ! {NextBallotNum,Uid},
+      worker(Uid,SavedData,ProcessData,VoteData,Members);
+    {list,List,From} ->
+      From ! ok,
+      worker(Uid,SavedData,ProcessData,VoteData,List);
+    disable ->
+      disabled_worker(Uid,SavedData,ProcessData,VoteData,Members);
+    {status,Key,From} ->
+      ProcessStatus = proplists:get_value(Key,ProcessData,null),
+      VoteStatus = proplists:get_value(Key,VoteData,null),
+      if
+        ProcessStatus /= null ->
+          {_,_,Value,Responders,_} = ProcessStatus,
+          Difference = length(Members) - length(Responders),
+          From ! {nextballot,Value,Difference};
+        VoteStatus /= null ->
+          {_,_,Quorum,Responders,_} = VoteStatus,
+          Difference = length(Quorum) - length(Responders),
+          From ! {voted,Difference};
+        true ->
+          From ! ProcessData
+      end,
+      worker(Uid,SavedData,ProcessData,VoteData,Members);
+    {propose,Key,PossibleValue,Callback} ->
+      NewBallot = {next_ballot_num(Key,SavedData),Uid},
+      lists:map(fun(Member) -> Member ! {request_lastvote,Key,NewBallot,self()} end, Members),
+      QuorumData = {Key,{NewBallot,null,PossibleValue,[],Callback}}, %% I may need to add things to this
+      worker(Uid,SavedData,[QuorumData|ProcessData],VoteData,Members);
+    {request_lastvote,Key,{NewNum,NewUid},From} ->
+      Data = proplists:get_value(Key,SavedData,null),
+      if
+        Data == null ->
+          From ! {lastvote,Key,Uid,null,null,{NewNum,NewUid}},
+          worker(Uid,[{Key,{null,null,NewNum}}|SavedData],ProcessData,VoteData,Members);
+        true ->
+          {LastBallot,Value,High} = Data,
+          if
+            NewNum =< High ->
+              From ! ignored,
+              worker(Uid,SavedData,ProcessData,VoteData,Members);
+            LastBallot == null ->
+              From ! {lastvote,Key,Uid,null,null,{NewNum,NewUid}},
+              UpdatedData = lists:keyreplace(Key,1,SavedData,{Key,{LastBallot,Value,NewNum}}),
+              worker(Uid,UpdatedData,ProcessData,VoteData,Members);
+            NewNum > High ->
+              From ! {lastvote,Key,Uid,LastBallot,Value,{NewNum,NewUid}},
+              UpdatedData = lists:keyreplace(Key,1,SavedData,{Key,{LastBallot,Value,NewNum}}),
+              worker(Uid,UpdatedData,ProcessData,VoteData,Members)
+          end
+      end;
+    {request_vote,Key,{NewNum,NewUid},Value,From} ->
+      Data = proplists:get_value(Key,SavedData,null),
+      if
+        Data == null ->   %% I wasn't part of this quorum!
+          worker(Uid,SavedData,ProcessData,VoteData,Members);
+        true ->
+          {_,_,High} = Data,
+          if
+            NewNum == High ->   %% all is good, this is the normal case
+              From ! {vote,Key,Uid,{NewNum,NewUid}},
+              UpdatedData = lists:keyreplace(Key,1,SavedData,{Key,{{NewNum,NewUid},Value,High}}),
+              worker(Uid,UpdatedData,ProcessData,VoteData,Members);
+            true ->   % a more recent ballot for this key has shown up, so ignore the old one
+              From ! ignored,
+              worker(Uid,SavedData,ProcessData,VoteData,Members)
+          end
+      end;
+    {lastvote,Key,OUid,LastBallot,LastValue,_} -> %% If the _ was something, it would be OriginalBallot
+      {OriginalBallot,CurrentBallot,ProposedValue,Responders,Callback} = proplists:get_value(Key,ProcessData,null),
+      if
+        LastBallot == null -> %% New responder, no ballot changes
+          UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,CurrentBallot,ProposedValue,[OUid|Responders],Callback}}),
+          worker(Uid,SavedData,UpdatedData,VoteData,Members);
+        CurrentBallot == null -> %% I honestly don't know what this does, but I did it for synod
+          UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,LastBallot,LastValue,[OUid|Responders],Callback}}),
+          worker(Uid,SavedData,UpdatedData,VoteData,Members);
+        true ->   %% Compare CurrentBallot and LastBallot by number
+          {CurNum,CurUid} = CurrentBallot,
+          {LastNum,LastUid} = LastBallot,
+          if
+            CurNum >= LastNum ->  %% No ballot changes
+              UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,CurrentBallot,ProposedValue,[OUid|Responders],Callback}}),
+              worker(Uid,SavedData,UpdatedData,VoteData,Members);
+            CurNum < LastNum ->   %% More recent ballot found
+              UpdatedData = lists:keyreplace(Key,1,ProcessData,{Key,{OriginalBallot,LastBallot,LastValue,[OUid|Responders],Callback}}),
+              worker(Uid,SavedData,UpdatedData,VoteData,Members)
+          end
+      end;
+    {vote,Key,OUid,Ballot} ->
+      {Ballot,Value,Quorum,Responders,Callback} = proplists:get_value(Key,VoteData,null),
+      case lists:member(OUid,Responders) or not lists:member(OUid,Quorum) of
+        true ->     %% someone tried to vote twice or someone not in the quorum tried to vote
+          worker(Uid,SavedData,ProcessData,VoteData,Members);
+        false ->    %% normal vote
+          UpdatedData = lists:keyreplace(Key,1,VoteData,{Key,{Ballot,Value,Quorum,[OUid|Responders],Callback}}),
+          worker(Uid,SavedData,ProcessData,UpdatedData,Members)
+      end;
+    exit ->
+      ok
+  after
+    100 ->
+      if
+        ProcessData /= [] ->
+          [{Key,Data}|RestOfData] = ProcessData,
+          {OriginalBallot,CurrentBallot,ProposedValue,Responders,Callback} = Data,
+          if
+            length(Responders) > length(Members) / 2 ->   %% we have a quorum
+              lists:map(fun(Member) -> Member ! {request_vote,Key,OriginalBallot,ProposedValue,Uid} end, Members),
+              NewVoteData = {Key,{OriginalBallot,ProposedValue,Responders,[],Callback}},
+              worker(Uid,SavedData,RestOfData,[NewVoteData|VoteData],Members);
+            true ->
+              worker(Uid,SavedData,RestOfData,VoteData,Members) %% I changed this at 12:06
+          end;
+        VoteData /= [] ->
+          [{Key,Data}|RestOfData] = VoteData,
+          {Ballot,Value,Quorum,Responders,Callback} = Data,
+          if
+            length(Responders) == length(Quorum) ->
+              lists:map(fun(Member) -> Member ! {success,Key,Value} end, Members),
+              if
+                Callback /= null ->   %% null pointers are a bitch
+                  Callback ! {success,Value};
+                true ->     %% I don't know why I need this, but now all the tests pass
+                  ok
+              end
+          end,
+          worker(Uid,SavedData,ProcessData,RestOfData,Members);
+        true ->   %% Nothing special here, resume working
+          worker(Uid,SavedData,ProcessData,VoteData,Members)
+      end
+  end.
+
+disabled_worker(Uid,SavedData,ProcessData,VoteData,Members) ->
+  receive
+    enable ->
+      worker(Uid,SavedData,ProcessData,VoteData,Members);
+    exit ->
+      ok
+  end.
+
+
+next_ballot_num(Key,SavedData) ->
+  Data = proplists:get_value(Key,SavedData,null), %% This match fails
+  if
+    Data == null -> 1;
+    true ->
+      {LastBallot,Value,High} = Data,
+      {BalNum,_} = LastBallot,
+      BalNum+1
+  end.
 
 setup2() ->
     start_paxos_member(paxos1),
@@ -745,8 +907,8 @@ set_members2_test_() ->
 
 % as above but with the key of the proposal we care about
 get_proposal_state(UniqueID,Key) ->
-        solveme.
-
+  UniqueID ! {status,Key,self()},
+  listen(50).
 
 % As start proposed_value above, but with a key.  This doubles as both
 % a "get" and "set" because it will return the old value if things are
@@ -756,7 +918,8 @@ get_proposal_state(UniqueID,Key) ->
 %
 % Note that several proposals need to be executable at the same time.
 start_propose_value(UniqueId,Key,PossibleValue) ->
-    solveme.
+  UniqueId ! {propose,Key,PossibleValue,null},
+  ok.
 
 
 
@@ -774,7 +937,8 @@ propose_paxos1_test_() ->
 
 % as propose_value above, but with a Key
 propose_value(UniqueId,Key,ProposedValue) ->
-    solveme.
+  UniqueId ! {propose,Key,ProposedValue,self()},
+  listen(500).
 
 
 propose_paxos2_test_() ->
